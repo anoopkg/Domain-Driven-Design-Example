@@ -102,6 +102,8 @@ namespace eCommerce.ApplicationLayer.Carts
             else
             {
                 checkOutResultDto.CheckOutIssue = checkOutIssue;
+                // Suggested remediation: log the issue and provide detailed information
+                this.LogCheckOutIssue(checkOutIssue.Value);
             }
 
             return checkOutResultDto;
