@@ -12,6 +12,7 @@ namespace eCommerce.DomainModelLayer.Tax
 
         public override void Flatten()
         {
+        // flatten
             this.Args.Add("CountryTaxId", CountryTax.Id);
             this.Args.Add("CountryTaxCountryId", CountryTax.Country.Id);
             this.Args.Add("CountryTaxPercentage", this.CountryTax.Percentage);
