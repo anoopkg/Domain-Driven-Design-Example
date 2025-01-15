@@ -1,5 +1,4 @@
 name: Repository Analysis Workflow
-
 on:
   push:
     branches: [ main ]
@@ -9,59 +8,37 @@ on:
   workflow_dispatch:
 
 env:
-  AWS_REGION: us-east-1
-  S3_BUCKET: your-bucket-name
-  ANALYSIS_API_ENDPOINT: https://your-analysis-service.com/api
+  SERVICE_URL: https://jc-ws1.axiarete.com
   MAX_POLLING_ATTEMPTS: 30
-  POLLING_INTERVAL: 60  # seconds
+  POLLING_INTERVAL: 5  # seconds (matching your UI's 5000ms interval)
 
 jobs:
   analyze-repo:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      id-token: write  # Needed for AWS authentication
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0  # Get full history
+          fetch-depth: 0  # Get full history for commit info
 
       - name: Get commit info
         id: commit
         run: |
-          echo "sha=$(git rev-parse HEAD)" >> $GITHUB_OUTPUT
-          echo "repo_name=${GITHUB_REPOSITORY##*/}" >> $GITHUB_OUTPUT
+          echo "current_sha=$(git rev-parse HEAD)" >> $GITHUB_OUTPUT
+          echo "previous_sha=$(git rev-parse HEAD^)" >> $GITHUB_OUTPUT
+          echo "branch=$(git rev-parse --abbrev-ref HEAD)" >> $GITHUB_OUTPUT
 
-      - name: Create zip archive
+      - name: Submit Analysis
+        id: submit
         run: |
-          zip -r repo.zip . -x '*.git*'
-
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
-          aws-region: ${{ env.AWS_REGION }}
-
-      - name: Upload to S3
-        id: upload
-        run: |
-          timestamp=$(date +%Y%m%d_%H%M%S)
-          s3_path="repos/${{ steps.commit.outputs.repo_name }}/${timestamp}_${{ steps.commit.outputs.sha }}.zip"
-          aws s3 cp repo.zip "s3://${{ env.S3_BUCKET }}/${s3_path}"
-          echo "s3_path=${s3_path}" >> $GITHUB_OUTPUT
-
-      - name: Trigger Analysis
-        id: trigger
-        run: |
-          response=$(curl -X POST "${{ env.ANALYSIS_API_ENDPOINT }}/analyze" \
+          response=$(curl -X POST "${{ env.SERVICE_URL }}/repo-analysis" \
             -H "Authorization: Bearer ${{ secrets.API_TOKEN }}" \
             -H "Content-Type: application/json" \
             -d '{
-              "repo_url": "s3://${{ env.S3_BUCKET }}/${{ steps.upload.outputs.s3_path }}",
-              "commit_sha": "${{ steps.commit.outputs.sha }}",
-              "repo_name": "${{ steps.commit.outputs.repo_name }}"
+              "repo_url": "${{ github.server_url }}/${{ github.repository }}.git",
+              "branch": "${{ steps.commit.outputs.branch }}",
+              "commit_id": "${{ steps.commit.outputs.current_sha }}",
+              "previous_commit_id": "${{ steps.commit.outputs.previous_sha }}"
             }')
           echo "job_id=$(echo $response | jq -r .job_id)" >> $GITHUB_OUTPUT
 
@@ -69,29 +46,25 @@ jobs:
         run: |
           attempt=1
           while [ $attempt -le ${{ env.MAX_POLLING_ATTEMPTS }} ]; do
-            response=$(curl -s "${{ env.ANALYSIS_API_ENDPOINT }}/status/${{ steps.trigger.outputs.job_id }}" \
+            response=$(curl -s "${{ env.SERVICE_URL }}/repo-analysis/status?job_id=${{ steps.submit.outputs.job_id }}" \
               -H "Authorization: Bearer ${{ secrets.API_TOKEN }}")
             status=$(echo $response | jq -r .status)
-          
-            if [ "$status" = "completed" ]; then
+            
+            if [ "$status" = "COMPLETED" ]; then
               echo "Analysis completed successfully"
+              file_count=$(echo $response | jq -r .file_count)
+              echo "Changed files: $file_count"
               exit 0
-            elif [ "$status" = "failed" ]; then
-              echo "Analysis failed"
-              exit 1
-            elif [ "$status" = "error" ]; then
-              echo "Analysis encountered an error"
+            elif [ "$status" = "FAILED" ]; then
+              error=$(echo $response | jq -r .error)
+              echo "Analysis failed: $error"
               exit 1
             fi
-          
-            echo "Attempt $attempt: Analysis still in progress, waiting..."
+            
+            echo "Attempt $attempt: Analysis status - $status, waiting..."
             sleep ${{ env.POLLING_INTERVAL }}
             attempt=$((attempt + 1))
           done
           
           echo "Maximum polling attempts reached"
           exit 1
-
-      - name: Cleanup
-        if: always()
-        run: rm -f repo.zip
